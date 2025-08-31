@@ -1126,6 +1126,13 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 		if self.history.is_done():
 			await self.log_completion()
+			
+			# Show browser state summary after task completion
+			try:
+				await self.show_browser_state_summary()
+			except Exception as e:
+				self.logger.debug(f"Error showing browser state summary: {e}")
+				
 			if self.register_done_callback:
 				if inspect.iscoroutinefunction(self.register_done_callback):
 					await self.register_done_callback(self.history)
@@ -1302,6 +1309,12 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 				if self.history.is_done():
 					self.logger.debug(f'🎯 Task completed after {step + 1} steps!')
 					await self.log_completion()
+					
+					# Show browser state summary after task completion
+					try:
+						await self.show_browser_state_summary()
+					except Exception as e:
+						self.logger.debug(f"Error showing browser state summary: {e}")
 
 					if self.register_done_callback:
 						if inspect.iscoroutinefunction(self.register_done_callback):
@@ -1333,6 +1346,41 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 			self.logger.debug('📊 Collecting usage summary...')
 			self.history.usage = await self.token_cost_service.get_usage_summary()
+			
+			# Get and log browser state summary
+			self.logger.info('🔍 Analyzing final browser state...')
+			assert self.browser_session is not None, 'BrowserSession is not set up'
+			final_browser_state = await self.browser_session.get_browser_state_summary(
+				cache_clickable_elements_hashes=True,
+				include_screenshot=False,
+				include_recent_events=True
+			)
+			
+			# Log browser state summary
+			self.logger.info("📊 FINAL BROWSER STATE ANALYSIS:")
+			self.logger.info(f"URL: {final_browser_state.url}")
+			self.logger.info(f"Title: {final_browser_state.title}")
+			self.logger.info(f"Tab count: {len(final_browser_state.tabs)}")
+			
+			# Count interactive elements
+			interactive_elements = len(final_browser_state.dom_state.selector_map) if final_browser_state.dom_state.selector_map else 0
+			self.logger.info(f"Interactive elements: {interactive_elements}")
+			
+			# Analyze DOM elements
+			if interactive_elements > 0 and final_browser_state.dom_state.selector_map:
+				element_types = {}
+				for element_id, element in final_browser_state.dom_state.selector_map.items():
+					# Use node_name instead of element_type
+					element_type = element.node_name.lower() if hasattr(element, 'node_name') else 'unknown'
+					if element_type in element_types:
+						element_types[element_type] += 1
+					else:
+						element_types[element_type] = 1
+				
+				# Log element types breakdown
+				self.logger.info("Element types found:")
+				for element_type, count in element_types.items():
+					self.logger.info(f"  - {element_type}: {count}")
 
 			# set the model output schema and call it on the fly
 			if self.history._output_model_schema is None and self.output_model_schema is not None:
@@ -1347,6 +1395,20 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			agent_run_error = 'KeyboardInterrupt'
 
 			self.history.usage = await self.token_cost_service.get_usage_summary()
+			
+			# Try to get final browser state even after interruption
+			try:
+				assert self.browser_session is not None, 'BrowserSession is not set up'
+				final_browser_state = await self.browser_session.get_browser_state_summary(
+					cache_clickable_elements_hashes=True,
+					include_screenshot=False
+				)
+				self.logger.info("📊 FINAL BROWSER STATE AT INTERRUPTION:")
+				self.logger.info(f"URL: {final_browser_state.url}")
+				self.logger.info(f"Title: {final_browser_state.title}")
+				self.logger.info(f"Tab count: {len(final_browser_state.tabs)}")
+			except Exception as state_err:
+				self.logger.debug(f"Could not get final browser state: {state_err}")
 
 			return self.history
 
@@ -2012,6 +2074,10 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 				
 				self.add_new_task(task)
 				result = await self.run(max_steps=max_steps_per_task)
+				
+				# Show browser state summary after task completion
+				await self.show_browser_state_summary()
+				
 				print("\n✅ Task completed. Browser session remains active.")
 			except Exception as e:
 				print(f"\n❌ Error during initial task: {e}")
@@ -2043,14 +2109,197 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 	def singleprocess_control_sync(self, task: str = None, max_steps_per_task: int = 20) -> None:
 		"""
-		Synchronous wrapper around continuous_browser_control for easier usage without asyncio.
+		Synchronous wrapper around process_one_task for easier usage without asyncio.
 		
 		Args:
-			initial_task: The first task to run (optional if agent was already initialized with a task)
-			max_steps_per_task: Maximum steps to take for each individual task
+			task: The task to run
+			max_steps_per_task: Maximum steps to take for the task
 			
 		Returns:
 			None
 		"""
 		import asyncio
-		return asyncio.run(self.singleprocess_control(task=task, max_steps_per_task=max_steps_per_task))
+		return asyncio.run(self.process_one_task(task=task, max_steps_per_task=max_steps_per_task))
+		
+	async def show_browser_state_summary(self, include_recent_events: bool = True) -> None:
+		"""
+		Analyze and print the current browser state summary.
+		
+		This function retrieves the browser state, analyzes DOM elements, and prints
+		detailed information about the current page, including interactive elements,
+		their types, and recent browser events if available.
+		
+		Args:
+			include_recent_events: Whether to include recent browser events in the summary
+			
+		Returns:
+			None
+		"""
+		print("\n🔍 Analyzing browser state...")
+		assert self.browser_session is not None, 'BrowserSession is not set up'
+		
+		browser_state_summary = await self.browser_session.get_browser_state_summary(
+			cache_clickable_elements_hashes=True,
+			include_screenshot=False,  # We don't need screenshots in the console output
+			include_recent_events=include_recent_events
+		)
+		
+		# Print browser state summary
+		print("\n📊 BROWSER STATE SUMMARY:")
+		print(f"URL: {browser_state_summary.url}")
+		print(f"Title: {browser_state_summary.title}")
+		print(f"Tab count: {len(browser_state_summary.tabs)}")
+		
+		# Display tabs information
+		print("\nTabs:")
+		for i, tab in enumerate(browser_state_summary.tabs):
+			active_indicator = "▶️ " if tab.is_active else "  "
+			print(f"{active_indicator}Tab {i+1}: {tab.title[:30]}{'...' if len(tab.title) > 30 else ''} ({tab.url[:40]}{'...' if len(tab.url) > 40 else ''})")
+		
+		# Analyze DOM elements
+		interactive_elements = len(browser_state_summary.dom_state.selector_map) if browser_state_summary.dom_state.selector_map else 0
+		print(f"\nInteractive elements: {interactive_elements}")
+		
+		# Identify element types and count them
+		element_types = {}
+		if browser_state_summary.dom_state.selector_map:
+			for element_id, element in browser_state_summary.dom_state.selector_map.items():
+				# Use node_name instead of element_type
+				element_type = element.node_name.lower() if hasattr(element, 'node_name') else 'unknown'
+				if element_type in element_types:
+					element_types[element_type] += 1
+				else:
+					element_types[element_type] = 1
+		
+		# Print element types breakdown
+		if element_types:
+			print("\nElement types found:")
+			for element_type, count in element_types.items():
+				print(f"  - {element_type}: {count}")
+				
+		# Provide structured details about each element
+		if browser_state_summary.dom_state.selector_map:
+			print("\n📋 DETAILED ELEMENT ANALYSIS:")
+			print(f"{'ID':<5} {'Type':<15} {'Visible':<10} {'Role':<15} {'Text Preview':<50}")
+			print("-" * 95)
+			
+			for element_id, element in browser_state_summary.dom_state.selector_map.items():
+				try:
+					# Extract properties with safeguards
+					node_type = element.node_name.lower() if hasattr(element, 'node_name') else 'unknown'
+					is_visible = "Yes" if getattr(element, 'is_visible', False) else "No"
+					
+					# Extract role from attributes if present
+					role = element.attributes.get('role', '') if hasattr(element, 'attributes') else ''
+					
+					# Get text content
+					text_content = ''
+					if hasattr(element, 'node_value') and element.node_value:
+						text_content = element.node_value
+					elif hasattr(element, 'attributes'):
+						# Try to get text from common attributes
+						for attr in ['value', 'placeholder', 'alt', 'title', 'aria-label']:
+							if attr in element.attributes and element.attributes[attr]:
+								text_content = element.attributes[attr]
+								break
+					
+					# Truncate text for display
+					if text_content:
+						text_content = text_content.replace('\n', ' ')[:47] + '...' if len(text_content) > 47 else text_content
+					
+					print(f"{element_id:<5} {node_type[:15]:<15} {is_visible:<10} {role[:15]:<15} {text_content[:50]}")
+				except Exception as e:
+					print(f"{element_id:<5} Error processing element: {str(e)[:50]}")
+					
+		# Identify tree structures in the DOM
+		self._identify_dom_tree_structures(browser_state_summary)
+		
+	def _identify_dom_tree_structures(self, state_summary):
+		"""
+		Identify potential tree structures in the DOM
+		
+		Args:
+			state_summary: The browser state summary containing DOM information
+			
+		Returns:
+			None
+		"""
+		if not state_summary.dom_state.selector_map:
+			return
+			
+		# Look for potential hierarchical elements
+		menu_items = []
+		list_items = []
+		tree_items = []
+		table_items = []
+		form_items = []
+		
+		for element_id, element in state_summary.dom_state.selector_map.items():
+			# Use node_name instead of element_type
+			element_type = element.node_name.lower() if hasattr(element, 'node_name') else 'unknown'
+			
+			# Get role if available
+			role = ""
+			if hasattr(element, 'attributes') and element.attributes and 'role' in element.attributes:
+				role = element.attributes['role'].lower()
+			
+			# Collect menu-related elements
+			if 'menu' in element_type or element_type in ['li', 'ul', 'ol', 'nav'] or 'menu' in role or role in ['menuitem', 'menubar']:
+				menu_items.append((element_id, element_type, role))
+				
+			# Collect list-related elements
+			if element_type in ['li', 'ul', 'ol', 'dl', 'dt', 'dd'] or role in ['list', 'listitem']:
+				list_items.append((element_id, element_type, role))
+				
+			# Collect tree-related elements
+			if 'tree' in element_type or element_type in ['details', 'summary'] or 'tree' in role or role in ['treeitem', 'treeview']:
+				tree_items.append((element_id, element_type, role))
+				
+			# Collect table-related elements
+			if element_type in ['table', 'tr', 'td', 'th', 'tbody', 'thead'] or role in ['table', 'row', 'cell', 'columnheader', 'rowheader']:
+				table_items.append((element_id, element_type, role))
+				
+			# Collect form-related elements
+			if element_type in ['form', 'input', 'select', 'textarea', 'button'] or role in ['form', 'button', 'textbox', 'checkbox', 'radio']:
+				form_items.append((element_id, element_type, role))
+		
+		# Print findings with details if any
+		if menu_items:
+			print(f"\n🍔 MENU STRUCTURE ({len(menu_items)} elements):")
+			for element_id, node_type, role in menu_items[:5]:  # Show only first 5
+				role_info = f", role={role}" if role else ""
+				print(f"  - ID {element_id}: {node_type}{role_info}")
+			if len(menu_items) > 5:
+				print(f"  ... and {len(menu_items) - 5} more menu elements")
+			
+		if list_items:
+			print(f"\n📋 LIST STRUCTURE ({len(list_items)} elements):")
+			for element_id, node_type, role in list_items[:5]:
+				role_info = f", role={role}" if role else ""
+				print(f"  - ID {element_id}: {node_type}{role_info}")
+			if len(list_items) > 5:
+				print(f"  ... and {len(list_items) - 5} more list elements")
+			
+		if tree_items:
+			print(f"\n🌳 TREE STRUCTURE ({len(tree_items)} elements):")
+			for element_id, node_type, role in tree_items[:5]:
+				role_info = f", role={role}" if role else ""
+				print(f"  - ID {element_id}: {node_type}{role_info}")
+			if len(tree_items) > 5:
+				print(f"  ... and {len(tree_items) - 5} more tree elements")
+			
+		if table_items:
+			print(f"\n📊 TABLE STRUCTURE ({len(table_items)} elements):")
+			for element_id, node_type, role in table_items[:5]:
+				role_info = f", role={role}" if role else ""
+				print(f"  - ID {element_id}: {node_type}{role_info}")
+			if len(table_items) > 5:
+				print(f"  ... and {len(table_items) - 5} more table elements")
+				
+		if form_items:
+			print(f"\n📝 FORM ELEMENTS ({len(form_items)} elements):")
+			for element_id, node_type, role in form_items[:5]:
+				role_info = f", role={role}" if role else ""
+				print(f"  - ID {element_id}: {node_type}{role_info}")
+			if len(form_items) > 5:
+				print(f"  ... and {len(form_items) - 5} more form elements")
