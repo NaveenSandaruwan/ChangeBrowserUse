@@ -1928,34 +1928,46 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		return asyncio.run(self.run(max_steps=max_steps, on_step_start=on_step_start, on_step_end=on_step_end))
 
 
-	async def shutdown(self) -> None:
+	async def shutdown(self, force_browser_close=True) -> None:
 		"""
 		Dedicated method to properly shut down the agent and close all resources.
 		This method can be called from outside the agent to ensure proper cleanup.
+		
+		Args:
+			force_browser_close: If True, close the browser even if keep_alive is set.
+						If False, respect the keep_alive setting.
 		
 		Returns:
 			None
 		"""
 		print("Shutting down agent...")
 		try:
-			# First check if the browser session is active and close it
+			# First check if the browser session is active
 			if self.browser_session is not None:
-				print("- Closing browser session...")
-				try:
-					# Force browser to close even if keep_alive is True
-					self.browser_session.browser_profile.keep_alive = False
-					await self.browser_session.kill()
-					print("✓ Browser session closed successfully.")
-				except Exception as browser_e:
-					print(f"! Browser close error: {browser_e}")
-					# Try alternative closure method if kill() fails
+				# Check if we should respect keep_alive setting
+				should_close_browser = force_browser_close or not self.browser_session.browser_profile.keep_alive
+				
+				if should_close_browser:
+					print("- Closing browser session...")
 					try:
-						print("- Attempting alternative browser closure...")
-						if hasattr(self.browser_session, "browser") and self.browser_session.browser:
-							await self.browser_session.browser.close()
-							print("✓ Browser closed with alternative method.")
-					except Exception as alt_e:
-						print(f"! Alternative browser close failed: {alt_e}")
+						# Only override keep_alive if force_browser_close is True
+						if force_browser_close:
+							self.browser_session.browser_profile.keep_alive = False
+							
+						await self.browser_session.kill()
+						print("✓ Browser session closed successfully.")
+					except Exception as browser_e:
+						print(f"! Browser close error: {browser_e}")
+						# Try alternative closure method if kill() fails
+						try:
+							print("- Attempting alternative browser closure...")
+							if hasattr(self.browser_session, "browser") and self.browser_session.browser:
+								await self.browser_session.browser.close()
+								print("✓ Browser closed with alternative method.")
+						except Exception as alt_e:
+							print(f"! Alternative browser close failed: {alt_e}")
+				else:
+					print("- Browser session kept alive as requested (keep_alive=True).")
 			
 			# Check if event bus is active before dispatching events
 			if hasattr(self, "eventbus") and self.eventbus:
@@ -1986,7 +1998,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			print("Error details:")
 			traceback.print_exc()
 	
-	async def process_one_task(self, task: str = None, max_steps_per_task: int = 20) -> None:
+	async def process_one_task(self, task: str = None, max_steps_per_task: int = 20, force_browser_close_on_exit: bool = True) -> None:
 			"""
 			Enable continuous browser control with multiple tasks without clearing history.
 			
@@ -1994,8 +2006,10 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			preserving browser state and context between interactions.
 			
 			Args:
-				initial_task: The first task to run (optional if agent was already initialized with a task)
+				task: The task to run
 				max_steps_per_task: Maximum steps to take for each individual task
+				force_browser_close_on_exit: Whether to force close the browser when exiting,
+				                             overriding the keep_alive setting
 				
 			Returns:
 				None - this function runs in an interactive loop until user terminates it.
@@ -2005,30 +2019,34 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			# Run initial task
 			if task == "exit":
 				print("Exiting continuous browser control mode...")
-				await self.shutdown()
+				await self.shutdown(force_browser_close=force_browser_close_on_exit)
 				return
 
 			try:
-				
 				self.add_new_task(task)
 				result = await self.run(max_steps=max_steps_per_task)
 				print("\n✅ Task completed. Browser session remains active.")
 			except Exception as e:
 				print(f"\n❌ Error during initial task: {e}")
 				print("Attempting to continue anyway...")
+				
 				# Reinitialize eventbus if it was shut down
 				try:
-					
-					self.eventbus = EventBus(name=f'Agent_{str(self.id)[-4:]}')
+					import uuid
+					# Generate a truly unique name using UUID
+					unique_name = f"Agent_{uuid.uuid4().hex[:8]}"
+					print(f"Reinitializing event bus with new name: {unique_name}")
+					self.eventbus = EventBus(name=unique_name)
 				except Exception as inner_e:
 					print(f"Failed to reinitialize event bus: {inner_e}")
-			
-			
+					
+				# Handle keyboard interrupts
+				try:
+					pass  # This is just to maintain structure - the nested try is removed
 				except KeyboardInterrupt:
 					print("\n⏸️ Paused. Press Ctrl+C again to exit or Enter to continue.")
 					try:
 						input()
-						
 					except KeyboardInterrupt:
 						print("\nExiting continuous browser control mode...")
 						return
