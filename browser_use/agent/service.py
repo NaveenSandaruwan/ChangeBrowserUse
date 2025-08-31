@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Generic, Literal, TypeVar
 from urllib.parse import urlparse
-
+from bubus import EventBus
 from dotenv import load_dotenv
 
 from browser_use.agent.cloud_events import (
@@ -1926,3 +1926,131 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		import asyncio
 
 		return asyncio.run(self.run(max_steps=max_steps, on_step_start=on_step_start, on_step_end=on_step_end))
+
+
+	async def shutdown(self) -> None:
+		"""
+		Dedicated method to properly shut down the agent and close all resources.
+		This method can be called from outside the agent to ensure proper cleanup.
+		
+		Returns:
+			None
+		"""
+		print("Shutting down agent...")
+		try:
+			# First check if the browser session is active and close it
+			if self.browser_session is not None:
+				print("- Closing browser session...")
+				try:
+					# Force browser to close even if keep_alive is True
+					self.browser_session.browser_profile.keep_alive = False
+					await self.browser_session.kill()
+					print("✓ Browser session closed successfully.")
+				except Exception as browser_e:
+					print(f"! Browser close error: {browser_e}")
+					# Try alternative closure method if kill() fails
+					try:
+						print("- Attempting alternative browser closure...")
+						if hasattr(self.browser_session, "browser") and self.browser_session.browser:
+							await self.browser_session.browser.close()
+							print("✓ Browser closed with alternative method.")
+					except Exception as alt_e:
+						print(f"! Alternative browser close failed: {alt_e}")
+			
+			# Check if event bus is active before dispatching events
+			if hasattr(self, "eventbus") and self.eventbus:
+				print("- Dispatching final events...")
+				try:
+					self.eventbus.dispatch(UpdateAgentTaskEvent.from_agent(self))
+					print("✓ Events dispatched.")
+				except Exception as event_e:
+					print(f"! Event dispatch error: {event_e}")
+					# Continue with shutdown even if event dispatch fails
+				
+				# Stop the event bus gracefully
+				print("- Stopping event bus...")
+				try:
+					await self.eventbus.stop(timeout=3.0)
+					print("✓ Event bus stopped.")
+				except Exception as bus_e:
+					print(f"! Event bus stop error: {bus_e}")
+			
+			# Complete cleanup
+			print("- Final cleanup...")
+			await self.close()
+			print("✓ Cleanup complete.")
+			print("✓ Shutdown successful.")
+		except Exception as e:
+			import traceback
+			print(f"Error during shutdown: {e}")
+			print("Error details:")
+			traceback.print_exc()
+	
+	async def process_one_task(self, task: str = None, max_steps_per_task: int = 20) -> None:
+			"""
+			Enable continuous browser control with multiple tasks without clearing history.
+			
+			This method allows the agent to continue taking input from the user after completing a task,
+			preserving browser state and context between interactions.
+			
+			Args:
+				initial_task: The first task to run (optional if agent was already initialized with a task)
+				max_steps_per_task: Maximum steps to take for each individual task
+				
+			Returns:
+				None - this function runs in an interactive loop until user terminates it.
+			"""
+			
+			
+			# Run initial task
+			if task == "exit":
+				print("Exiting continuous browser control mode...")
+				await self.shutdown()
+				return
+
+			try:
+				
+				self.add_new_task(task)
+				result = await self.run(max_steps=max_steps_per_task)
+				print("\n✅ Task completed. Browser session remains active.")
+			except Exception as e:
+				print(f"\n❌ Error during initial task: {e}")
+				print("Attempting to continue anyway...")
+				# Reinitialize eventbus if it was shut down
+				try:
+					
+					self.eventbus = EventBus(name=f'Agent_{str(self.id)[-4:]}')
+				except Exception as inner_e:
+					print(f"Failed to reinitialize event bus: {inner_e}")
+			
+			
+				except KeyboardInterrupt:
+					print("\n⏸️ Paused. Press Ctrl+C again to exit or Enter to continue.")
+					try:
+						input()
+						
+					except KeyboardInterrupt:
+						print("\nExiting continuous browser control mode...")
+						return
+				except Exception as e:
+					print(f"\n❌ Error: {e}")
+					print("Browser session may be in an inconsistent state.")
+					choice = input("Continue anyway? (y/n): ")
+					if choice.lower() != 'y':
+						return
+			
+			print("Continuous browser control session ended.")
+
+	def singleprocess_control_sync(self, task: str = None, max_steps_per_task: int = 20) -> None:
+		"""
+		Synchronous wrapper around continuous_browser_control for easier usage without asyncio.
+		
+		Args:
+			initial_task: The first task to run (optional if agent was already initialized with a task)
+			max_steps_per_task: Maximum steps to take for each individual task
+			
+		Returns:
+			None
+		"""
+		import asyncio
+		return asyncio.run(self.singleprocess_control(task=task, max_steps_per_task=max_steps_per_task))
