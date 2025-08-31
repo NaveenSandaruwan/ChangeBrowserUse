@@ -1,2 +1,4 @@
 .\browser\Scripts\Activate
 python -m venv browser
+
+git remote add origin https://github.com/NaveenSandaruwan/ChangeBrowserUse.git
