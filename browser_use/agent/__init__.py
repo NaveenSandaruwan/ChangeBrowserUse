@@ -4,7 +4,8 @@ Browser Use Agent Module
 This module provides the agent interface for browser automation and control.
 """
 
-from .service import BrowserAgent
-from . import dom_tree
+from .service import Agent
+# Import dom_tree_visualizer module
+from .dom_tree_visualizer import DOMTreeVisualizer, visualize_dom_after_task
 
-__all__ = ["BrowserAgent", "dom_tree"]
+__all__ = ["Agent", "DOMTreeVisualizer", "visualize_dom_after_task"]

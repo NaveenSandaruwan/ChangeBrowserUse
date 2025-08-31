@@ -58,7 +58,7 @@ from browser_use.agent.views import (
 from browser_use.browser.session import DEFAULT_BROWSER_PROFILE
 from browser_use.browser.views import BrowserStateSummary
 from browser_use.config import CONFIG
-from browser_use.dom.views import DOMInteractedElement
+from browser_use.dom.views import DOMInteractedElement, NodeType
 from browser_use.filesystem.file_system import FileSystem
 from browser_use.observability import observe, observe_debug
 from browser_use.sync import CloudSync
@@ -1990,6 +1990,173 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		return asyncio.run(self.run(max_steps=max_steps, on_step_start=on_step_start, on_step_end=on_step_end))
 
 
+	async def show_browser_state_summary(self) -> None:
+		"""
+		Display a detailed summary of the current browser state, including DOM tree visualization.
+		This is called automatically at the end of process_one_task.
+		
+		Returns:
+			None
+		"""
+		if not self.browser_session:
+			self.logger.warning("No active browser session for DOM visualization")
+			return
+			
+		try:
+			# Get basic browser state info
+			browser_state = await self.browser_session.get_browser_state_summary(
+				include_screenshot=False,
+				include_recent_events=False
+			)
+			
+			# Log basic browser info
+			self.logger.info("📊 BROWSER STATE SUMMARY:")
+			self.logger.info(f"URL: {browser_state.url}")
+			self.logger.info(f"Title: {browser_state.title}")
+			self.logger.info(f"Tab count: {len(browser_state.tabs)}")
+			
+			# Get interactive element count and types
+			interactive_elements = []
+			element_types = {}
+			
+			if browser_state.dom_state and browser_state.dom_state.selector_map:
+				for node in browser_state.dom_state.selector_map.values():
+					if node.element_index is not None:
+						interactive_elements.append(node)
+						element_type = node.node_name.lower()
+						element_types[element_type] = element_types.get(element_type, 0) + 1
+			
+			self.logger.info(f"Interactive elements: {len(interactive_elements)}")
+			if element_types:
+				self.logger.info("Element types found:")
+				for elem_type, count in sorted(element_types.items(), key=lambda x: x[1], reverse=True):
+					self.logger.info(f"  - {elem_type}: {count}")
+					
+			# Now create a DomService directly to get detailed information
+			try:
+				from browser_use.dom.service import DomService
+				
+				# Create DOM service
+				dom_service = DomService(self.browser_session)
+				
+				# Get DOM tree directly from service
+				if self.browser_session.current_target_id:
+					# Get DOM tree with proper target ID
+					dom_tree = await dom_service.get_dom_tree(target_id=self.browser_session.current_target_id)
+					
+					if dom_tree:
+						# Process and display DOM structure information
+						self.logger.info("� PAGE STRUCTURE ANALYSIS:")
+						
+						# Count elements by type
+						element_counts = {}
+						text_content_by_tag = {}
+						interactive_nodes = []
+						
+						def analyze_node(node, depth=0):
+							if node.node_type == NodeType.ELEMENT_NODE:
+								tag = node.node_name.lower()
+								element_counts[tag] = element_counts.get(tag, 0) + 1
+								
+								# Track interactive elements
+								if node.element_index is not None:
+									interactive_nodes.append((node, depth))
+								
+								# Collect text content for important elements
+								if tag in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'a', 'button', 'label']:
+									text = ""
+									if node.children_nodes:
+										for child in node.children_nodes:
+											if child.node_type == NodeType.TEXT_NODE and child.node_value:
+												text += child.node_value.strip() + " "
+									
+									text = text.strip()
+									if text:
+										if tag not in text_content_by_tag:
+											text_content_by_tag[tag] = []
+										text_content_by_tag[tag].append(text[:100])
+							
+							# Process children
+							if node.children_nodes:
+								for child in node.children_nodes:
+									analyze_node(child, depth + 1)
+									
+							# Process iframe content
+							if node.content_document:
+								analyze_node(node.content_document, depth + 1)
+								
+							# Process shadow DOM
+							if node.shadow_roots:
+								for shadow in node.shadow_roots:
+									analyze_node(shadow, depth + 1)
+						
+						# Analyze the entire tree
+						analyze_node(dom_tree)
+						
+						# Display element counts
+						self.logger.info(f"Total element types: {len(element_counts)}")
+						self.logger.info("Most common elements:")
+						for tag, count in sorted(element_counts.items(), key=lambda x: x[1], reverse=True)[:8]:
+							self.logger.info(f"  - {tag}: {count}")
+						
+						# Display heading structure if available
+						headings = []
+						for h_tag in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']:
+							if h_tag in text_content_by_tag:
+								for text in text_content_by_tag[h_tag]:
+									headings.append((h_tag, text))
+						
+						if headings:
+							self.logger.info("\nPage heading structure:")
+							for h_tag, text in headings[:5]:  # Limit to first 5
+								self.logger.info(f"  {h_tag}: {text}")
+						
+						# Display page content summary
+						page_content = []
+						for tag in ['p', 'li']:
+							if tag in text_content_by_tag:
+								page_content.extend(text_content_by_tag[tag])
+						
+						if page_content:
+							self.logger.info("\nPage content preview:")
+							for text in page_content[:3]:  # Limit to first 3
+								self.logger.info(f"  • {text}")
+						
+						# Display interactive elements
+						if interactive_nodes:
+							self.logger.info(f"\nInteractive elements ({len(interactive_nodes)}):")
+							for node, depth in sorted(interactive_nodes, key=lambda x: x[1])[:8]:  # Sort by depth, show first 8
+								tag = node.node_name.lower()
+								attrs = []
+								
+								for key, value in node.attributes.items():
+									if key in ['id', 'class', 'role', 'type', 'name']:
+										attrs.append(f"{key}='{value}'")
+										
+								attrs_text = " ".join(attrs) if attrs else ""
+								
+								# Get text or value
+								text = ""
+								if tag == 'input' and 'value' in node.attributes:
+									text = f"value='{node.attributes['value']}'"
+								elif node.children_nodes:
+									for child in node.children_nodes:
+										if child.node_type == NodeType.TEXT_NODE and child.node_value:
+											text = child.node_value.strip()[:50]
+											break
+								
+								self.logger.info(f"  [{node.element_index}] <{tag} {attrs_text}> {text}")
+					else:
+						self.logger.info("Unable to retrieve detailed DOM tree structure")
+				else:
+					self.logger.info("No active browser target available")
+					
+			except Exception as e:
+				self.logger.error(f"Error analyzing DOM structure: {e}")
+				
+		except Exception as e:
+			self.logger.error(f"Error visualizing browser state: {e}")
+			
 	async def shutdown(self) -> None:
 		"""
 		Dedicated method to properly shut down the agent and close all resources.
@@ -2076,6 +2243,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 				result = await self.run(max_steps=max_steps_per_task)
 				
 				# Show browser state summary after task completion
+				print("\n✅ Task completed successfully")
 				await self.show_browser_state_summary()
 				
 				print("\n✅ Task completed. Browser session remains active.")
