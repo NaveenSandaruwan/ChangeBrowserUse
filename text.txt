@@ -1,0 +1,2 @@
+.\browser\Scripts\Activate
+python -m venv browser
