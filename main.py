@@ -28,7 +28,8 @@ async def main():
         profile="Default",
         chrome_executable_path=r"C:\Program Files\Google\Chrome\Application\chrome.exe",
         keep_alive=True,
-        enable_default_extensions=True
+        enable_default_extensions=True,
+        highlight_elements=True  # Enable bounding box highlighting
     )
     browser = BrowserSession(
         browser_profile=profile
