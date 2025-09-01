@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Generic, Literal, TypeVar
 from urllib.parse import urlparse
-from bubus import EventBus
+
 from dotenv import load_dotenv
 
 from browser_use.agent.cloud_events import (
@@ -1926,7 +1926,6 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		import asyncio
 
 		return asyncio.run(self.run(max_steps=max_steps, on_step_start=on_step_start, on_step_end=on_step_end))
-
 
 	async def shutdown(self) -> None:
 		"""
